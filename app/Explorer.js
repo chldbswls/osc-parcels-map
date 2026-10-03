@@ -5,7 +5,7 @@ import Link from "next/link";
 import "maplibre-gl/dist/maplibre-gl.css";
 import "./explorer.css";
 
-const KEY = process.env.NEXT_PUBLIC_VWORLD_KEY;
+const KEY = process.env.NEXT_PUBLIC_VWORLD_KEY?.trim();
 const SEOUL = { center: [126.99, 37.555], zoom: 10.4 };
 const LAND_ZOOM = 15; // 이 줌 이상에서 아무 곳이나 클릭하면 토지정보 조회
 const GU_ZOOM = 12.5; // 이 줌 미만에서 자치구 버블 표시

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-const KEY = process.env.NEXT_PUBLIC_VWORLD_KEY;
+const KEY = process.env.NEXT_PUBLIC_VWORLD_KEY?.trim();
 const TILE_Z = 18; // 바닥 영상 타일 레벨 (약 120m/타일)
 const RELOAD_STEP = 10; // 기준점이 이 거리(m) 이상 움직이면 다시 조회
 

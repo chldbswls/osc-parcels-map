@@ -1,6 +1,6 @@
 // data.go.kr 국토교통부_건축HUB_건축물대장정보 서비스 — 표제부(getBrTitleInfo)
 // PNU(19자리) = 시군구(5) + 법정동(5) + 대지구분(1: 일반, 2: 산) + 본번(4) + 부번(4)
-const KEY = process.env.DATA_GO_KR_KEY;
+const KEY = process.env.DATA_GO_KR_KEY?.trim();
 const ENDPOINT = "https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo";
 
 const num = (v) => (v === "" || v == null || Number.isNaN(Number(v)) ? null : Number(v));

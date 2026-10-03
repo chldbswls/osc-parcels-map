@@ -1,5 +1,5 @@
 // 지점 반경 r(m) 안의 건물 외곽선·높이를 VWorld 건물통합정보(LT_C_BLDGINFO)에서 조회
-const KEY = process.env.VWORLD_KEY;
+const KEY = process.env.VWORLD_KEY?.trim(); // 환경 변수에 붙여 넣다 섞인 공백·줄바꿈 제거
 
 export async function GET(req) {
   const { searchParams } = new URL(req.url);

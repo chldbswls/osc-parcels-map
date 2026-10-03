@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import "leaflet/dist/leaflet.css";
 
-const KEY = process.env.NEXT_PUBLIC_VWORLD_KEY;
+const KEY = process.env.NEXT_PUBLIC_VWORLD_KEY?.trim();
 
 const LAYERS = {
   Base: { label: "일반", ext: "png" },

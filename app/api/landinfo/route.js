@@ -1,5 +1,5 @@
 // 클릭 지점의 연속지적(지번·지목·공시지가)과 용도지역을 VWorld 데이터 API로 조회
-const KEY = process.env.VWORLD_KEY;
+const KEY = process.env.VWORLD_KEY?.trim(); // 환경 변수에 붙여 넣다 섞인 공백·줄바꿈 제거
 
 async function getFeature(data, lng, lat, geometry, domain) {
   const u = new URL("https://api.vworld.kr/req/data");
