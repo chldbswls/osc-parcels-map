@@ -11,6 +11,7 @@ export default function Home() {
       height: p.height, shape: p.shape, road: p.road, osc: p.osc, rentType: p.rentType,
       amenities: p.amenities, amenityPct: p.amenityPct ?? null,
       score: p.score ?? null, scoreTop: p.scoreTop ?? null, guN: p.guN ?? null,
+      basement: p.basement, flood: p.flood, risk: p.risk,
     }));
   return <Explorer parcels={slim} />;
 }

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import "maplibre-gl/dist/maplibre-gl.css";
 import "./explorer.css";
+import { RISK, RISK_ORDER } from "@/lib/risk";
 
 const KEY = process.env.NEXT_PUBLIC_VWORLD_KEY?.trim();
 const SEOUL = { center: [126.99, 37.555], zoom: 10.4 };
@@ -16,6 +17,8 @@ const OVERLAYS = {
   cad: { label: "지적도", desc: "필지 경계·지번 (17레벨 이상)", layers: "lp_pa_cbnd_bubun,lp_pa_cbnd_bonbun", opacity: 1 },
 };
 export const OSC_COLORS = { 소형: "#12b886", 중형: "#f08c00", 대형: "#e03131" };
+const FLOOD_YEARS = [2010, 2011, 2012, 2013, 2014, 2016, 2017, 2018, 2019, 2020, 2022, 2023, 2024, 2025];
+const DEPTH_COLOR = ["interpolate", ["linear"], ["coalesce", ["get", "d"], 0], 0, "#a5d8ff", 0.3, "#4dabf7", 0.6, "#1c7ed6", 1, "#1864ab", 2, "#0b2e5c"];
 const SCORE_STOPS = [[0, "#e8590c"], [35, "#f59f00"], [50, "#fab005"], [65, "#94d82d"], [100, "#2b8a3e"]];
 
 function scoreColor(s) {
@@ -30,6 +33,12 @@ function scoreColor(s) {
     }
   }
   return SCORE_STOPS.at(-1)[1];
+}
+
+function parcelColor(p, colorBy) {
+  if (colorBy === "risk") return RISK[p.risk]?.color ?? "#adb5bd";
+  if (colorBy === "score") return scoreColor(p.score);
+  return OSC_COLORS[p.osc] ?? "#adb5bd";
 }
 
 const won = (n) => (n == null ? "–" : `${n.toLocaleString("ko-KR")}원/㎡`);
@@ -55,11 +64,13 @@ export default function Explorer({ parcels }) {
   const s = useRef({}); // 지도 이벤트 핸들러가 읽는 최신 상태
 
   const [ready, setReady] = useState(false);
-  const [tab, setTab] = useState("layers");
+  const [tab, setTab] = useState("flood");
   const [collapsed, setCollapsed] = useState(false);
   const [base, setBase] = useState("Base");
   const [overlays, setOverlays] = useState({ zone: false, cad: false });
-  const [colorBy, setColorBy] = useState("score");
+  const [colorBy, setColorBy] = useState("risk");
+  const [riskFilter, setRiskFilter] = useState(null); // null = 전체, 아니면 RISK 키
+  const [flood, setFlood] = useState({ on: true, year: null, loading: false, loaded: false, error: null });
   const [oscFilter, setOscFilter] = useState("");
   const [rentFilter, setRentFilter] = useState("");
   const [gu, setGu] = useState(null);
@@ -83,6 +94,22 @@ export default function Explorer({ parcels }) {
   }, [parcels]);
 
   const byId = useMemo(() => new Map(parcels.map((p) => [p.id, p])), [parcels]);
+
+  // 반지하 × 침수 집계 (선택한 구가 있으면 그 구만)
+  const riskStats = useMemo(() => {
+    const scope = gu ? parcels.filter((p) => p.gu === gu) : parcels;
+    const counts = Object.fromEntries(RISK_ORDER.map((k) => [k, 0]));
+    for (const p of scope) counts[p.risk] = (counts[p.risk] ?? 0) + 1;
+    const units = scope.reduce((s, p) => s + (p.basement?.basementUnits ?? 0), 0);
+    const top = scope
+      .filter((p) => p.risk === "high" || p.risk === "near")
+      .sort((a, b) =>
+        (a.risk === "high" ? 0 : 1) - (b.risk === "high" ? 0 : 1) ||
+        (b.flood?.ownMaxDepth ?? b.flood?.maxDepth ?? 0) - (a.flood?.ownMaxDepth ?? a.flood?.maxDepth ?? 0) ||
+        (b.flood?.nearCount ?? 0) - (a.flood?.nearCount ?? 0))
+      .slice(0, 30);
+    return { counts, units, top, n: scope.length };
+  }, [parcels, gu]);
 
   // ── 지도 생성 ────────────────────────────────────
   useEffect(() => {
@@ -112,6 +139,8 @@ export default function Explorer({ parcels }) {
           sources: {
             Base: wmts("Base", "png"), Satellite: wmts("Satellite", "jpeg"), Hybrid: wmts("Hybrid", "png"), white: wmts("white", "png"),
             zone: wms(OVERLAYS.zone.layers), cad: wms(OVERLAYS.cad.layers),
+            "flood-pts": { type: "geojson", data: EMPTY },
+            "flood-poly": { type: "geojson", data: EMPTY },
             parcels: { type: "geojson", data: EMPTY },
             selected: { type: "geojson", data: EMPTY },
             radius: { type: "geojson", data: EMPTY },
@@ -124,12 +153,29 @@ export default function Explorer({ parcels }) {
             { id: "white", type: "raster", source: "white", layout: { visibility: "none" } },
             { id: "zone", type: "raster", source: "zone", layout: { visibility: "none" }, paint: { "raster-opacity": OVERLAYS.zone.opacity } },
             { id: "cad", type: "raster", source: "cad", minzoom: 16, layout: { visibility: "none" } },
+            // 서울시 침수흔적도 — 멀리선 열지도, 가까이선 실제 침수 영역(깊이별 색)
+            {
+              id: "flood-heat", type: "heatmap", source: "flood-pts", maxzoom: 15,
+              paint: {
+                "heatmap-weight": ["interpolate", ["linear"], ["coalesce", ["get", "d"], 0], 0, 0.35, 1, 1],
+                "heatmap-intensity": ["interpolate", ["linear"], ["zoom"], 9, 0.25, 12, 0.5, 14, 1],
+                "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 9, 3, 12, 7, 14, 14],
+                "heatmap-color": ["interpolate", ["linear"], ["heatmap-density"], 0, "rgba(59,130,246,0)", 0.25, "rgba(116,192,252,0.35)", 0.5, "rgba(51,154,240,0.5)", 0.8, "rgba(25,113,194,0.6)", 1, "rgba(16,70,140,0.7)"],
+                "heatmap-opacity": ["interpolate", ["linear"], ["zoom"], 13.5, 0.8, 15, 0],
+              },
+            },
+            {
+              id: "flood-fill", type: "fill", source: "flood-poly", minzoom: 13.5,
+              paint: { "fill-color": DEPTH_COLOR, "fill-opacity": ["interpolate", ["linear"], ["zoom"], 13.5, 0, 14.5, 0.62] },
+            },
+            { id: "flood-line", type: "line", source: "flood-poly", minzoom: 15, paint: { "line-color": "#1864ab", "line-width": 0.6, "line-opacity": 0.6 } },
             { id: "selected-fill", type: "fill", source: "selected", paint: { "fill-color": ["get", "color"], "fill-opacity": 0.22 } },
             { id: "selected-line", type: "line", source: "selected", paint: { "line-color": ["get", "color"], "line-width": 3.5 } },
             { id: "radius-fill", type: "fill", source: "radius", paint: { "fill-color": "#0c8599", "fill-opacity": 0.06 } },
             { id: "radius-line", type: "line", source: "radius", paint: { "line-color": "#0c8599", "line-width": 2 } },
             {
               id: "parcels", type: "circle", source: "parcels",
+              layout: { "circle-sort-key": ["get", "rank"] }, // 위험 등급이 높은 점을 위에
               paint: {
                 "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 2.5, 13, 5, 16, 8, 18, 11],
                 "circle-color": ["get", "color"],
@@ -194,14 +240,14 @@ export default function Explorer({ parcels }) {
   useEffect(() => {
     if (!ready) return;
     const features = parcels
-      .filter((p) => (!oscFilter || p.osc === oscFilter) && (!rentFilter || p.rentType === rentFilter))
+      .filter((p) => (!oscFilter || p.osc === oscFilter) && (!rentFilter || p.rentType === rentFilter) && (!riskFilter || p.risk === riskFilter))
       .map((p) => ({
         type: "Feature", id: Number(p.id),
         geometry: { type: "Point", coordinates: [p.coord[1], p.coord[0]] },
-        properties: { id: p.id, gu: p.gu, color: colorBy === "score" ? scoreColor(p.score) : OSC_COLORS[p.osc] ?? "#adb5bd" },
+        properties: { id: p.id, gu: p.gu, color: parcelColor(p, colorBy), rank: RISK_ORDER.length - RISK_ORDER.indexOf(p.risk) },
       }));
     map.current.getSource("parcels").setData({ type: "FeatureCollection", features });
-  }, [ready, parcels, colorBy, oscFilter, rentFilter]);
+  }, [ready, parcels, colorBy, oscFilter, rentFilter, riskFilter]);
 
   // ── 배경·중첩 레이어 ─────────────────────────────
   useEffect(() => {
@@ -212,6 +258,31 @@ export default function Explorer({ parcels }) {
     }
     for (const k of Object.keys(OVERLAYS)) m.setLayoutProperty(k, "visibility", overlays[k] ? "visible" : "none");
   }, [ready, base, overlays]);
+
+  // ── 침수흔적 (서울시 2010~2025) — 처음 켤 때 한 번 불러온다 ─────
+  useEffect(() => {
+    if (!ready || !flood.on || flood.loaded || flood.loading) return;
+    setFlood((f) => ({ ...f, loading: true }));
+    Promise.all([fetch("/flood/points.json").then((r) => r.json()), fetch("/flood/traces.json").then((r) => r.json())])
+      .then(([pts, poly]) => {
+        map.current.getSource("flood-pts").setData({
+          type: "FeatureCollection",
+          features: pts.map(([lng, lat, y, d]) => ({ type: "Feature", geometry: { type: "Point", coordinates: [lng, lat] }, properties: { y, d } })),
+        });
+        map.current.getSource("flood-poly").setData(poly);
+        setFlood((f) => ({ ...f, loading: false, loaded: true, count: pts.length }));
+      })
+      .catch(() => setFlood((f) => ({ ...f, loading: false, error: "침수흔적을 불러오지 못했어요" })));
+  }, [ready, flood.on, flood.loaded, flood.loading]);
+
+  useEffect(() => {
+    if (!ready) return;
+    const m = map.current;
+    for (const id of ["flood-heat", "flood-fill", "flood-line"]) {
+      m.setLayoutProperty(id, "visibility", flood.on ? "visible" : "none");
+      m.setFilter(id, flood.year ? ["==", ["get", "y"], flood.year] : null);
+    }
+  }, [ready, flood.on, flood.year]);
 
   // 패널이 가리는 쪽만큼 지도 여백을 줘서 "화면 중심"이 보이는 영역의 가운데가 되게 한다
   useEffect(() => {
@@ -236,6 +307,14 @@ export default function Explorer({ parcels }) {
     map.current.once("moveend", () => { if (map.current.getZoom() < 13) map.current.easeTo({ zoom: 13 }); });
   }
 
+  function selectParcel(p) {
+    if (!map.current) return; // 지도가 아직 준비 전
+    setGu(p.gu);
+    lookupLand([p.coord[1], p.coord[0]], p);
+    // 좁은 화면에선 lookupLand가 패널을 접으며 지도 여백을 바꾸므로, 그 뒤에 이동해야 애니메이션이 끊기지 않는다
+    setTimeout(() => map.current?.easeTo({ center: [p.coord[1], p.coord[0]], zoom: 17, duration: 800 }), 60);
+  }
+
   function resetView() {
     setGu(null);
     setSelected(null);
@@ -249,8 +328,8 @@ export default function Explorer({ parcels }) {
     setSelected({ parcel, land: null, loading: true, lngLat });
     try {
       const d = await (await fetch(`/api/landinfo?lat=${lngLat[1]}&lng=${lngLat[0]}`)).json();
-      const color = parcel ? (colorBy === "score" ? scoreColor(parcel.score) : OSC_COLORS[parcel.osc] ?? "#868e96") : "#0c8599";
-      map.current.getSource("selected").setData(
+      const color = parcel ? parcelColor(parcel, colorBy) : "#0c8599";
+      map.current?.getSource("selected")?.setData(
         d.parcel?.geometry ? { type: "Feature", geometry: d.parcel.geometry, properties: { color } } : EMPTY
       );
       setSelected((cur) => (cur?.lngLat === lngLat ? { ...cur, land: d, loading: false, reg: d.parcel?.pnu ? { loading: true } : null } : cur));
@@ -293,8 +372,8 @@ export default function Explorer({ parcels }) {
     if (f) {
       const p = byId.get(f.properties.id);
       if (!gu || gu !== p.gu) setGu(p.gu);
-      if (m.getZoom() < 16) m.easeTo({ center: [p.coord[1], p.coord[0]], zoom: 17, duration: 700 });
       lookupLand([p.coord[1], p.coord[0]], p);
+      if (m.getZoom() < 16) setTimeout(() => m.easeTo({ center: [p.coord[1], p.coord[0]], zoom: 17, duration: 700 }), 60);
       return;
     }
     if (m.getZoom() >= LAND_ZOOM) lookupLand([e.lngLat.lng, e.lngLat.lat], null);
@@ -390,12 +469,63 @@ export default function Explorer({ parcels }) {
         </header>
 
         <nav className="ex-tabs">
-          {[["layers", "지도"], ["parcels", "필지"], ["legend", "범례"]].map(([k, l]) => (
+          {[["flood", "반지하·침수"], ["layers", "지도"], ["parcels", "필지"], ["legend", "범례"]].map(([k, l]) => (
             <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>{l}</button>
           ))}
         </nav>
 
         <div className="ex-body">
+          {tab === "flood" && (
+            <>
+              <section>
+                <h2>{gu ?? "서울"} 노후 매입임대 {riskStats.n}필지</h2>
+                <div className="risk-grid">
+                  {RISK_ORDER.filter((k) => k !== "unknown" || riskStats.counts.unknown).map((k) => (
+                    <button key={k} className={`risk-card ${riskFilter === k ? "on" : ""}`} style={{ "--c": RISK[k].color }}
+                      onClick={() => { setRiskFilter((f) => (f === k ? null : k)); setColorBy("risk"); }}>
+                      <b>{riskStats.counts[k]}</b><span>{RISK[k].label}</span>
+                    </button>
+                  ))}
+                </div>
+                <p className="note">
+                  반지하 주거 세대 합계 <b>{riskStats.units.toLocaleString()}가구</b>. 카드를 누르면 그 등급만 지도에 남아요{riskFilter && <> · <button onClick={() => setRiskFilter(null)}>전체 보기</button></>}
+                </p>
+              </section>
+              <section>
+                <h2>침수흔적 2010–2025</h2>
+                <label className="switch-row">
+                  <span><b>침수흔적 표시</b><small>{flood.loading ? "불러오는 중…" : flood.error ?? `서울시 침수흔적도 · ${flood.count ? flood.count.toLocaleString() + "건" : "약 4.3만 건"} · 색 = 침수 깊이`}</small></span>
+                  <input type="checkbox" checked={flood.on} onChange={(e) => setFlood((f) => ({ ...f, on: e.target.checked }))} />
+                  <i />
+                </label>
+                <div className="chips years">
+                  <button className={!flood.year ? "on" : ""} onClick={() => setFlood((f) => ({ ...f, year: null }))}>전체</button>
+                  {FLOOD_YEARS.map((y) => (
+                    <button key={y} className={flood.year === y ? "on" : ""} onClick={() => setFlood((f) => ({ ...f, year: y, on: true }))}>{y}</button>
+                  ))}
+                </div>
+                <p className="note">2010·2011·2022년 집중호우 기록이 대부분이에요. 15레벨 이상 확대하면 침수된 건물 영역이 깊이별 색으로 보여요.</p>
+              </section>
+              <section>
+                <h2>우선 살펴볼 필지</h2>
+                {riskStats.top.length === 0 ? <p className="note">해당하는 필지가 없어요.</p> : (
+                  <ul className="risk-list">
+                    {riskStats.top.map((p) => (
+                      <li key={p.id}>
+                        <button onClick={() => selectParcel(p)} className={selected?.parcel?.id === p.id ? "on" : ""}>
+                          <i style={{ background: RISK[p.risk].color }} />
+                          <span><b>{p.gu} {p.dong} {p.jibun}</b>
+                            <small>반지하 {p.basement.basementUnits}가구 · {p.risk === "high" ? `${p.flood.ownYears.join("·")} 이 필지 침수${p.flood.ownMaxDepth ? ` ${p.flood.ownMaxDepth}m` : ""}` : `100m 안 침수 ${p.flood.nearCount}건 (${p.flood.years.join("·")})`}</small>
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+            </>
+          )}
+
           {tab === "layers" && (
             <>
               <section>
@@ -449,6 +579,7 @@ export default function Explorer({ parcels }) {
               <section>
                 <h2>점 색상</h2>
                 <div className="seg">
+                  <button className={colorBy === "risk" ? "on" : ""} onClick={() => setColorBy("risk")}>침수 위험</button>
                   <button className={colorBy === "score" ? "on" : ""} onClick={() => setColorBy("score")}>생활편의 점수</button>
                   <button className={colorBy === "osc" ? "on" : ""} onClick={() => setColorBy("osc")}>OSC 공법</button>
                 </div>
@@ -490,6 +621,15 @@ export default function Explorer({ parcels }) {
           {tab === "legend" && (
             <>
               <section>
+                <h2>반지하 × 침수 위험</h2>
+                <ul className="legend-list">
+                  {RISK_ORDER.map((k) => <li key={k}><i style={{ background: RISK[k].color }} />{RISK[k].label}</li>)}
+                </ul>
+                <p className="note"><b>반지하 주거</b>: 건축물대장 층별개요에서 지하층 용도가 주택·가구·세대 등 주거인 건물. <b>이 필지 침수</b>: 침수흔적의 주소 지번이 같거나 필지 좌표가 침수 영역 안. <b>100m 안</b>: 필지 좌표에서 100m 안에 침수흔적이 있음.</p>
+                <div className="grad" style={{ background: "linear-gradient(90deg, #a5d8ff, #4dabf7 15%, #1c7ed6 30%, #1864ab 50%, #0b2e5c)" }} />
+                <div className="grad-ticks"><span>침수 깊이 0m</span><span>1m</span><span>2m+</span></div>
+              </section>
+              <section>
                 <h2>생활편의 점수</h2>
                 <div className="grad" style={{ background: `linear-gradient(90deg, ${SCORE_STOPS.map(([v, c]) => `${c} ${v}%`).join(",")})` }} />
                 <div className="grad-ticks"><span>0</span><span>50</span><span>100</span></div>
@@ -504,7 +644,7 @@ export default function Explorer({ parcels }) {
               </section>
               <section>
                 <h2>데이터</h2>
-                <p className="note">필지·OSC·생활편의: LH 토지주택연구원 『OSC기반 매입임대주택 정비모델 연구』(2025-026)<br />지도·지적·용도지역·건물: VWorld 국토교통부</p>
+                <p className="note">필지·OSC·생활편의: LH 토지주택연구원 『OSC기반 매입임대주택 정비모델 연구』(2025-026)<br />지도·지적·용도지역·건물: VWorld 국토교통부<br />건축물대장(표제부·층별개요): 국토교통부 건축HUB (data.go.kr)<br />침수흔적: 서울특별시 「서울시 침수흔적도」 2010–2025 (공공누리 1유형)</p>
                 <div className="link-row"><Link href="/list">필지 목록</Link><Link href="/cases">사례대지 4필지</Link></div>
               </section>
             </>
@@ -512,7 +652,7 @@ export default function Explorer({ parcels }) {
         </div>
       </aside>
 
-      {selected && <ParcelCard sel={selected} onClose={() => { setSelected(null); map.current.getSource("selected").setData(EMPTY); }} />}
+      {selected && <ParcelCard sel={selected} onClose={() => { setSelected(null); map.current?.getSource("selected")?.setData(EMPTY); }} />}
     </div>
   );
 }
@@ -520,6 +660,29 @@ export default function Explorer({ parcels }) {
 const fmtDay = (d) => (d && d.length === 8 ? `${d.slice(0, 4)}.${d.slice(4, 6)}.${d.slice(6)}` : "");
 
 // 필지 카드 맨 위 한 줄: data.go.kr 건축물대장 (연면적 · 층수 · 주용도)
+// 필지 카드: 반지하 주거 × 침수 이력 한 줄
+function FloodLine({ p }) {
+  const b = p.basement, f = p.flood;
+  const r = RISK[p.risk];
+  const parts = [];
+  if (!b) parts.push("건축물대장 층별 정보 없음");
+  else if (b.basementRes) parts.push(`반지하 주거 ${b.basementUnits}가구${b.basementArea ? ` · ${b.basementArea}㎡` : ""}`);
+  else if (b.hasBasement) parts.push(`지하층 있음 (${b.basementUses.slice(0, 2).join(", ") || "비주거"})`);
+  else parts.push("지하층 없음");
+  if (f?.onParcel) parts.push(`${f.ownYears.join("·")}년 이 필지 침수${f.ownMaxDepth ? ` (최대 ${f.ownMaxDepth}m)` : ""}`);
+  if (f?.nearCount) parts.push(`100m 안 침수 ${f.nearCount}건 · 가장 가까운 기록 ${f.nearest}m`);
+  else if (f) parts.push("100m 안 침수 기록 없음");
+  return (
+    <div className="ex-reg ex-flood" style={{ "--c": r.color }}>
+      <span className="ex-reg-src">{r.short}<small>반지하·침수</small></span>
+      <div className="ex-reg-body">
+        {parts.map((t, i) => (i === 0 ? <b key={i}>{t}</b> : <span key={i}>{t}</span>))}
+        {f?.top?.[0] && <span className="muted">최근접: {f.top[0].disaster || `${f.top[0].year}년`} · {f.top[0].zone}</span>}
+      </div>
+    </div>
+  );
+}
+
 function RegisterLine({ reg }) {
   let body;
   if (reg.loading) body = <span className="muted">건축물대장 조회 중…</span>;
@@ -583,6 +746,7 @@ function ParcelCard({ sel, onClose }) {
         )}
       </div>
 
+      {p && <FloodLine p={p} />}
       {sel.reg && <RegisterLine reg={sel.reg} />}
 
       <div className="ex-card-body">

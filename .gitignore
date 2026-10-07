@@ -4,3 +4,5 @@ node_modules
 .DS_Store
 .vercel
 .next-build
+data/flood/zip/
+data/flood/shp/
