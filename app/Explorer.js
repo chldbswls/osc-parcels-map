@@ -342,10 +342,15 @@ export default function Explorer({ parcels }) {
   // data.go.kr 건축물대장 표제부 — 필지 PNU로 연면적·층수 조회
   async function loadRegister(pnu, lngLat) {
     let reg;
-    try {
-      reg = await (await fetch(`/api/bldg-register?pnu=${pnu}`)).json();
-    } catch {
-      reg = { error: "조회 실패" };
+    // 배포 직후 첫 요청이나 data.go.kr 지연으로 가끔 실패해서 한 번 더 시도
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        reg = await (await fetch(`/api/bldg-register?pnu=${pnu}`)).json();
+        if (!reg.error) break;
+      } catch {
+        reg = { error: "조회 실패" };
+      }
+      await new Promise((r) => setTimeout(r, 800));
     }
     console.log("[data.go.kr 건축물대장]", pnu, reg); // F12 콘솔에서 응답 확인용
     setSelected((cur) => (cur?.lngLat === lngLat ? { ...cur, reg } : cur));
